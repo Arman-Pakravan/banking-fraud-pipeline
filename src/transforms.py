@@ -124,7 +124,7 @@ def _card_windows():
         "running": Window.partitionBy("card_id").orderBy("unix_time")
                          .rowsBetween(Window.unboundedPreceding, 0),
         "24h":     Window.partitionBy("card_id").orderBy("unix_time")
-                         .rangeBetween(-3, 0),
+                         .rowsBetween(-3, 0),
         "7d":      Window.partitionBy("card_id").orderBy("unix_time")
                          .rangeBetween(-604800, 0),
         "lag":     Window.partitionBy("card_id").orderBy("unix_time"),
