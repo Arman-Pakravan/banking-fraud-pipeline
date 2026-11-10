@@ -15,15 +15,21 @@ EARTH_RADIUS_KM = 6371.0
 
 PII_COLUMNS = ["cc_num", "first", "last", "street", "dob"]
 
-# Each rule returns True when the row is BAD.
-QUALITY_RULES = {
-    "null_amount":           F.col("amt").isNull(),
-    "non_positive_amount":   F.col("amt") <= 0,
-    "unparseable_timestamp": F.col("trans_ts").isNull(),
-    "invalid_fraud_label":   ~F.col("is_fraud").isin(0, 1),
-    "null_card_number":      F.col("cc_num").isNull(),
-    "null_transaction_id":   F.col("trans_num").isNull(),
-}
+def quality_rules() -> dict:
+    """The data-quality rules. Each returns True when the row is BAD.
+
+    Built inside a function rather than as a module-level constant because
+    constructing a Column requires a live SparkContext. At module import time
+    there isn't one, so a module-level dict would crash on import.
+    """
+    return {
+        "null_amount":           F.col("amt").isNull(),
+        "non_positive_amount":   F.col("amt") <= 0,
+        "unparseable_timestamp": F.col("trans_ts").isNull(),
+        "invalid_fraud_label":   ~F.col("is_fraud").isin(0, 1),
+        "null_card_number":      F.col("cc_num").isNull(),
+        "null_transaction_id":   F.col("trans_num").isNull(),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -61,7 +67,7 @@ def flag_quality(df: DataFrame) -> DataFrame:
     return df.withColumn(
         "_quality_failures",
         F.array_compact(F.array(*[
-            F.when(cond, F.lit(name)) for name, cond in QUALITY_RULES.items()
+            F.when(cond, F.lit(name)) for name, cond in quality_rules().items()
         ])))
 
 

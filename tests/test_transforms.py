@@ -2,10 +2,15 @@
 
 Each test builds a handful of rows by hand, runs one transform, and asserts on
 the result. Small deliberate inputs catch logic errors that 1.3M real rows hide.
+
+Fixtures are built with an EXPLICIT all-string schema rather than letting Spark
+infer one. Bronze really is all strings, so this matches production -- and it is
+also the only way to build a row whose column is None, which type inference
+cannot handle (nothing to infer from).
 """
 
 import pytest
-from pyspark.sql import Row
+from pyspark.sql.types import StructType, StructField, StringType
 
 from transforms import (
     cast_types, flag_quality, split_quarantine, mask_pii, deduplicate,
@@ -13,8 +18,20 @@ from transforms import (
     build_daily_summary, PII_COLUMNS,
 )
 
+# Column order of the bronze table, as landed from the source CSV.
+BRONZE_COLUMNS = [
+    "_c0", "trans_date_trans_time", "cc_num", "merchant", "category", "amt",
+    "first", "last", "gender", "street", "city", "state", "zip",
+    "lat", "long", "city_pop", "job", "dob", "trans_num", "unix_time",
+    "merch_lat", "merch_long", "is_fraud",
+]
 
-def bronze_row(**overrides):
+BRONZE_SCHEMA = StructType([
+    StructField(name, StringType(), nullable=True) for name in BRONZE_COLUMNS
+])
+
+
+def bronze_row(**overrides) -> dict:
     """A valid all-STRING bronze row. Override any field to make it invalid."""
     base = dict(
         _c0="1",
@@ -33,7 +50,13 @@ def bronze_row(**overrides):
         is_fraud="0",
     )
     base.update(overrides)
-    return Row(**base)
+    return base
+
+
+def bronze_df(spark, rows):
+    """Build a bronze-shaped DataFrame with the explicit schema."""
+    tuples = [tuple(row[col] for col in BRONZE_COLUMNS) for row in rows]
+    return spark.createDataFrame(tuples, schema=BRONZE_SCHEMA)
 
 
 # --------------------------------------------------------------------------
@@ -41,7 +64,7 @@ def bronze_row(**overrides):
 # --------------------------------------------------------------------------
 
 def test_cast_types_produces_real_types(spark):
-    df = cast_types(spark.createDataFrame([bronze_row()]))
+    df = cast_types(bronze_df(spark, [bronze_row()]))
     types = dict(df.dtypes)
 
     assert types["amt"] == "double"
@@ -52,7 +75,7 @@ def test_cast_types_produces_real_types(spark):
 
 
 def test_cast_types_nulls_unparseable_timestamp(spark):
-    df = cast_types(spark.createDataFrame([bronze_row(trans_date_trans_time="not a date")]))
+    df = cast_types(bronze_df(spark, [bronze_row(trans_date_trans_time="not a date")]))
     assert df.first()["trans_ts"] is None
 
 
@@ -61,7 +84,7 @@ def test_cast_types_nulls_unparseable_timestamp(spark):
 # --------------------------------------------------------------------------
 
 def test_clean_row_has_no_quality_failures(spark):
-    df = flag_quality(cast_types(spark.createDataFrame([bronze_row()])))
+    df = flag_quality(cast_types(bronze_df(spark, [bronze_row()])))
     assert df.first()["_quality_failures"] == []
 
 
@@ -72,9 +95,10 @@ def test_clean_row_has_no_quality_failures(spark):
     ({"trans_date_trans_time": "garbage"},  "unparseable_timestamp"),
     ({"is_fraud": "7"},                     "invalid_fraud_label"),
     ({"trans_num": None},                   "null_transaction_id"),
+    ({"cc_num": None},                      "null_card_number"),
 ])
 def test_bad_rows_are_flagged(spark, overrides, expected_rule):
-    df = flag_quality(cast_types(spark.createDataFrame([bronze_row(**overrides)])))
+    df = flag_quality(cast_types(bronze_df(spark, [bronze_row(**overrides)])))
     assert expected_rule in df.first()["_quality_failures"]
 
 
@@ -84,7 +108,7 @@ def test_quarantine_separates_good_from_bad(spark):
         bronze_row(trans_num="bad1", amt="-1.00"),
         bronze_row(trans_num="good2"),
     ]
-    flagged = flag_quality(cast_types(spark.createDataFrame(rows)))
+    flagged = flag_quality(cast_types(bronze_df(spark, rows)))
     passed, quarantined = split_quarantine(flagged)
 
     assert passed.count() == 2
@@ -95,12 +119,22 @@ def test_quarantine_separates_good_from_bad(spark):
     assert "_quality_failures" not in passed.columns
 
 
+def test_a_row_can_break_several_rules_at_once(spark):
+    row = bronze_row(amt="-5.00", trans_date_trans_time="garbage")
+    df = flag_quality(cast_types(bronze_df(spark, [row])))
+    failures = df.first()["_quality_failures"]
+
+    assert "non_positive_amount" in failures
+    assert "unparseable_timestamp" in failures
+    assert len(failures) == 2
+
+
 # --------------------------------------------------------------------------
 # PII masking
 # --------------------------------------------------------------------------
 
 def test_mask_pii_removes_every_identifier(spark):
-    df = mask_pii(cast_types(spark.createDataFrame([bronze_row()])))
+    df = mask_pii(cast_types(bronze_df(spark, [bronze_row()])))
     for col in PII_COLUMNS:
         assert col not in df.columns, f"{col} survived masking"
 
@@ -108,16 +142,24 @@ def test_mask_pii_removes_every_identifier(spark):
 def test_card_id_is_a_stable_sha256(spark):
     rows = [bronze_row(trans_num="a"), bronze_row(trans_num="b")]
     ids = [r["card_id"] for r in
-           mask_pii(cast_types(spark.createDataFrame(rows))).collect()]
+           mask_pii(cast_types(bronze_df(spark, rows))).collect()]
 
     assert len(ids[0]) == 64                      # SHA-256 hex
     assert ids[0] == ids[1]                        # same card -> same id
     assert "4841313716651064" not in ids[0]        # not the card number
 
 
+def test_different_cards_get_different_ids(spark):
+    rows = [bronze_row(trans_num="a", cc_num="1111111111111111"),
+            bronze_row(trans_num="b", cc_num="2222222222222222")]
+    ids = {r["card_id"] for r in
+           mask_pii(cast_types(bronze_df(spark, rows))).collect()}
+    assert len(ids) == 2
+
+
 def test_customer_age_is_derived_from_dob(spark):
     # born 1989-10-28, transacting 2019-08-04 -> 29 (birthday not yet reached)
-    df = mask_pii(cast_types(spark.createDataFrame([bronze_row()])))
+    df = mask_pii(cast_types(bronze_df(spark, [bronze_row()])))
     assert df.first()["customer_age"] == 29
 
 
@@ -128,7 +170,7 @@ def test_customer_age_is_derived_from_dob(spark):
 def test_deduplicate_removes_repeated_transaction_id(spark):
     rows = [bronze_row(trans_num="dup"), bronze_row(trans_num="dup"),
             bronze_row(trans_num="unique")]
-    df = deduplicate(cast_types(spark.createDataFrame(rows)))
+    df = deduplicate(cast_types(bronze_df(spark, rows)))
     assert df.count() == 2
 
 
@@ -149,7 +191,7 @@ def card_history(spark):
         bronze_row(trans_num="t4", amt="10.00", unix_time="1000300000",
                    trans_date_trans_time="2001-09-12 13:06:40"),
     ]
-    return add_card_features(mask_pii(cast_types(spark.createDataFrame(rows))))
+    return add_card_features(mask_pii(cast_types(bronze_df(spark, rows))))
 
 
 def test_txn_sequence_increments_in_time_order(spark):
@@ -193,7 +235,7 @@ def test_separate_cards_do_not_share_history(spark):
         bronze_row(trans_num="a1", cc_num="1111", unix_time="1000000000"),
         bronze_row(trans_num="b1", cc_num="2222", unix_time="1000000001"),
     ]
-    out = add_card_features(mask_pii(cast_types(spark.createDataFrame(rows))))
+    out = add_card_features(mask_pii(cast_types(bronze_df(spark, rows))))
     # Each card's first transaction is sequence 1 -- partitioning works.
     assert {r["card_txn_seq"] for r in out.collect()} == {1}
 
@@ -205,13 +247,13 @@ def test_separate_cards_do_not_share_history(spark):
 def test_haversine_matches_known_distance(spark):
     """One degree of longitude at the equator is ~111.19 km."""
     row = bronze_row(lat="0.0", long="0.0", merch_lat="0.0", merch_long="1.0")
-    df = add_merchant_distance(cast_types(spark.createDataFrame([row])))
+    df = add_merchant_distance(cast_types(bronze_df(spark, [row])))
     assert df.first()["merch_distance_km"] == pytest.approx(111.19, abs=0.1)
 
 
 def test_zero_distance_when_merchant_is_at_home(spark):
     row = bronze_row(lat="43.7", long="-72.4", merch_lat="43.7", merch_long="-72.4")
-    df = add_merchant_distance(cast_types(spark.createDataFrame([row])))
+    df = add_merchant_distance(cast_types(bronze_df(spark, [row])))
     assert df.first()["merch_distance_km"] == pytest.approx(0.0, abs=1e-6)
 
 
@@ -223,7 +265,7 @@ def test_night_flag_set_for_early_hours(spark):
     night = bronze_row(trans_date_trans_time="2019-08-04 03:15:00")
     day   = bronze_row(trans_date_trans_time="2019-08-04 14:15:00")
     out = {r["hour_of_day"]: r["is_night"] for r in
-           add_temporal_features(cast_types(spark.createDataFrame([night, day]))).collect()}
+           add_temporal_features(cast_types(bronze_df(spark, [night, day]))).collect()}
     assert out[3] == 1
     assert out[14] == 0
 
@@ -241,7 +283,7 @@ def test_daily_summary_counts_and_rate(spark):
         bronze_row(trans_num="d3", amt="50.00",  is_fraud="0",
                    trans_date_trans_time="2019-08-05 10:00:00"),
     ]
-    df = add_temporal_features(cast_types(spark.createDataFrame(rows)))
+    df = add_temporal_features(cast_types(bronze_df(spark, rows)))
     summary = {str(r["txn_date"]): r for r in build_daily_summary(df).collect()}
 
     assert summary["2019-08-04"]["txn_count"] == 2

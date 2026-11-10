@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git/
+*.csv
+*.zip
+data/
+spark-warehouse/
+metastore_db/
+derby.log
+mlruns/
