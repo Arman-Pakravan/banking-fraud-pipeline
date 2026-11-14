@@ -1,0 +1,10 @@
+# Local Airflow with the Databricks provider installed.
+#
+# This is a single-container Airflow running in standalone mode (SQLite +
+# SequentialExecutor). That is not a production topology -- a real deployment
+# uses Postgres, a scheduler, a webserver and Celery or Kubernetes workers --
+# but it runs one DAG on a laptop without needing eight containers.
+
+FROM apache/airflow:2.10.3
+
+RUN pip install --no-cache-dir apache-airflow-providers-databricks==6.11.0

@@ -1,0 +1,31 @@
+# Local Airflow for triggering the Databricks job.
+#
+#   docker compose up --build
+#
+# Then open http://localhost:8080. Credentials are printed in the container
+# logs on first start (user "admin").
+#
+# Credentials come from .env, which is gitignored. See .env.example.
+
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    env_file: .env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      # Airflow reads connections from AIRFLOW_CONN_* env vars, so the
+      # Databricks connection is defined here rather than clicked into the UI.
+      # That keeps it reproducible -- a fresh container is already configured.
+      AIRFLOW_CONN_DATABRICKS_DEFAULT: >-
+        {"conn_type": "databricks",
+         "host": "${DATABRICKS_HOST}",
+         "password": "${DATABRICKS_TOKEN}"}
+      DATABRICKS_JOB_ID: "${DATABRICKS_JOB_ID}"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    command: standalone
