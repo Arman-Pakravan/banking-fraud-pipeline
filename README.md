@@ -98,7 +98,7 @@ change that reads as a harmless simplification and would plausibly pass code rev
 CI failed on `test_24h_window_is_time_based_not_row_based` with `assert 4 == 1`, and branch
 protection blocked the merge.
 
-<!-- TODO: screenshot of the failed check on the PR -->
+![CI blocking a regression](docs/ci_blocked.png)
 
 That test is a trap set for one specific future mistake. It's the most useful thing in this repo.
 
@@ -117,7 +117,7 @@ right at it. That comes from a hand-built window feature, before any model is in
 Six consecutive successful runs, four of them scheduled with nobody watching, all within nine
 seconds of each other.
 
-<!-- TODO: screenshot of Databricks run history -->
+![Databricks run history](docs/run_history.png)
 
 The job sources its notebooks from GitHub `main` rather than from the workspace. Combined with
 branch protection, that closes the loop: **code only reaches `main` through a PR with passing
@@ -144,6 +144,12 @@ hashing. Real tokenization uses a salt or a vault.
 required.
 
 **Batch only.** Real fraud detection is substantially real-time; streaming is the obvious extension.
+
+### Dashboard
+
+![Fraud detection dashboard](docs/dashboard.png)
+
+Built on `gold.daily_fraud_summary` via a Databricks SQL warehouse, Import mode.
 
 ---
 
