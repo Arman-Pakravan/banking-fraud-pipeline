@@ -26,6 +26,3 @@ mlruns/
 
 # Secrets
 .env
-
-# Power BI
-*.pbix
